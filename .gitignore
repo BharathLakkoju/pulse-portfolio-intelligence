@@ -12,6 +12,7 @@ apps/web/prisma/dev.db-journal
 apps/web/prisma/prisma/
 apps/web/.env
 coverage/
+*.tsbuildinfo
 .DS_Store
 Thumbs.db
 apps/web/.uploads/
