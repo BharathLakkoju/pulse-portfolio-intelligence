@@ -1,0 +1,12 @@
+{
+  "name": "Pulse: Your Portfolio Intelligence",
+  "short_name": "Pulse",
+  "description": "Know the pulse of your money: what you own, how it performs, where the risk is, and what deserves attention.",
+  "start_url": "/overview",
+  "display": "standalone",
+  "background_color": "#0b0f14",
+  "theme_color": "#0b0f14",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

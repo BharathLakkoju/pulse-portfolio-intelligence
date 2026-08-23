@@ -1,0 +1,417 @@
+// Pulse — Prisma schema
+// SQLite locally (see QUESTIONS.md #2 for why, and the migration path to Postgres).
+// Money/quantity fields are String (decimal text), parsed only via decimal.js in app code —
+// see CLAUDE.md "decimal-safe types" rule. Never use Float for anything valuation/tax related.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+model User {
+  id                String   @id @default(cuid())
+  email             String   @unique
+  name              String?
+  createdAt         DateTime @default(now())
+
+  // Onboarding fields (PRD "Identity and Onboarding")
+  country           String   @default("IN")
+  taxResidency      String   @default("IN")
+  baseCurrency      String   @default("INR")
+  language          String   @default("en")
+  investorProfile   String   @default("investor") // investor | trader | crypto | nri_global | advisor_ca
+  onboardingComplete Boolean @default(false)
+
+  mfaEnabled        Boolean  @default(false) // stubbed — see QUESTIONS.md #7
+  passkeysEnabled   Boolean  @default(false)
+
+  portfolios        Portfolio[]
+  sessions          Session[]
+  alerts            Alert[]
+  alertRules        AlertRule[]
+  subscription      Subscription?
+  invoices          Invoice[]
+  auditLogs         AuditLog[]
+  magicLinks        MagicLink[]
+  savedReports      SavedReport[]
+  aiQueries         AiQuery[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  device    String?
+  ipHash    String?
+  revokedAt DateTime?
+}
+
+model MagicLink {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  consumedAt DateTime?
+}
+
+// ---------------------------------------------------------------------------
+// Portfolio / accounts
+// ---------------------------------------------------------------------------
+
+model Portfolio {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name          String
+  baseCurrency  String   @default("INR")
+  isDemo        Boolean  @default(false)
+  dashboardKind String   @default("long_term") // long_term | trading | crypto | family | tax
+  createdAt     DateTime @default(now())
+
+  accounts          Account[]
+  transactions      Transaction[]
+  targetAllocations TargetAllocation[]
+  goals             Goal[]
+  snapshots         Snapshot[]
+  taxLots           TaxLot[]
+  documents         DocumentUpload[]
+  alerts            Alert[]
+}
+
+model Account {
+  id           String   @id @default(cuid())
+  portfolioId  String
+  portfolio    Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  name         String
+  sourceType   String   // broker | mutual_fund | crypto_exchange | bank | manual | wallet
+  provider     String   // e.g. "demo_broker", "manual", "demo_crypto_exchange"
+  currency     String   @default("INR")
+  isReadOnly   Boolean  @default(true)
+  isDemo       Boolean  @default(false)
+  status       String   @default("healthy") // healthy | delayed | reconnect_required | partial_data | failed | retired
+  scopesGranted String  @default("read_holdings,read_transactions") // comma-separated, shown pre-consent
+  connectedAt  DateTime @default(now())
+  lastSyncAt   DateTime?
+  encryptedTokenRef String? // AES-GCM ciphertext, see lib/crypto.ts — no real OAuth token exists for demo connectors
+
+  transactions Transaction[]
+
+  @@index([portfolioId])
+}
+
+// ---------------------------------------------------------------------------
+// Instrument master / pricing / FX
+// ---------------------------------------------------------------------------
+
+model Instrument {
+  id          String   @id @default(cuid())
+  symbol      String
+  isin        String?
+  exchange    String   // NSE | BSE | NASDAQ | NYSE | CRYPTO | MF | OTHER
+  name        String
+  assetClass  String   // equity | etf | mutual_fund | crypto | cash | fixed_deposit | bond | gold | other
+  sector      String?
+  country     String   @default("IN")
+  currency    String   @default("INR")
+
+  prices       PriceHistory[]
+  transactions Transaction[]
+  taxLots      TaxLot[]
+
+  @@unique([symbol, exchange])
+}
+
+model PriceHistory {
+  id           String   @id @default(cuid())
+  instrumentId String
+  instrument   Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  date         DateTime
+  close        String   // decimal text
+  source       String   @default("synthetic") // synthetic | live | delayed | eod
+  isSynthetic  Boolean  @default(true)
+
+  @@unique([instrumentId, date])
+  @@index([instrumentId])
+}
+
+model FxRate {
+  id        String   @id @default(cuid())
+  base      String
+  quote     String
+  date      DateTime
+  rate      String   // decimal text: 1 base = rate quote
+  isSynthetic Boolean @default(true)
+
+  @@unique([base, quote, date])
+}
+
+model BenchmarkPrice {
+  id          String   @id @default(cuid())
+  benchmarkId String   // NIFTY50 | NIFTY500 | SENSEX | SP500 | MSCI_WORLD | BTC
+  date        DateTime
+  close       String
+  isSynthetic Boolean  @default(true)
+
+  @@unique([benchmarkId, date])
+}
+
+// ---------------------------------------------------------------------------
+// Canonical transaction ledger — mirrors CLAUDE.md exactly. IMMUTABLE:
+// corrections insert a new row referencing correctsTransactionId, never UPDATE
+// a historical amount field in place.
+// ---------------------------------------------------------------------------
+
+model Transaction {
+  id                   String   @id @default(cuid())
+  portfolioId          String
+  portfolio            Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  accountId            String
+  account              Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  sourceId             String   // e.g. "manual", "csv_import", "demo_broker", "demo_crypto_exchange", "statement_upload"
+  sourceTransactionId  String?
+
+  occurredAt           DateTime
+  settledAt            DateTime?
+  importedAt           DateTime @default(now())
+  timezone             String   @default("Asia/Kolkata")
+
+  eventType            String   // buy | sell | dividend | interest | fee | transfer_in | transfer_out | split | merger | spin_off | airdrop | staking_reward | withholding_tax | FX_conversion
+
+  instrumentId         String?
+  instrument           Instrument? @relation(fields: [instrumentId], references: [id])
+
+  quantity             String   @default("0")
+  unitPrice             String  @default("0")
+  grossAmount          String   @default("0")
+  feeAmount            String   @default("0")
+  taxAmount            String   @default("0")
+  currency             String   @default("INR")
+
+  fxRateToBase         String?
+  sourceDocumentRef    String?
+  parseConfidence      Float    @default(1)
+  reconciliationState  String   @default("clean") // clean | needs_review | duplicate_suspected | resolved | corrected
+
+  rawPayloadRef        String?
+  correctsTransactionId String?
+  dedupeHash           String
+
+  createdAt            DateTime @default(now())
+
+  @@index([portfolioId])
+  @@index([accountId])
+  @@index([instrumentId])
+  @@index([dedupeHash])
+}
+
+// ---------------------------------------------------------------------------
+// Tax lots (India v1, FIFO default — see region-config.ts)
+// ---------------------------------------------------------------------------
+
+model TaxLot {
+  id                  String   @id @default(cuid())
+  portfolioId         String
+  portfolio           Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  instrumentId        String
+  instrument          Instrument @relation(fields: [instrumentId], references: [id])
+  openTransactionId   String
+  acquiredAt          DateTime
+  quantityOriginal    String
+  quantityRemaining   String
+  costBasisPerUnit    String
+  currency            String   @default("INR")
+  closedAt            DateTime?
+  closeTransactionId  String?
+  realizedGain        String?
+  holdingPeriod        String?  // short_term | long_term, computed at close
+
+  @@index([portfolioId])
+  @@index([instrumentId])
+}
+
+// ---------------------------------------------------------------------------
+// Allocation / goals
+// ---------------------------------------------------------------------------
+
+model TargetAllocation {
+  id          String   @id @default(cuid())
+  portfolioId String
+  portfolio   Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  category    String   // asset class name
+  targetWeight Float   // 0..1
+  updatedAt   DateTime @updatedAt
+
+  @@unique([portfolioId, category])
+}
+
+model Goal {
+  id                   String   @id @default(cuid())
+  portfolioId          String
+  portfolio            Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  name                 String
+  type                 String   // emergency_fund | home | education | retirement | travel | custom
+  targetAmount         String
+  targetDate           DateTime
+  contributionAmount   String   @default("0")
+  contributionFrequency String  @default("monthly") // monthly | quarterly | yearly | one_time
+  expectedReturnLow    Float    @default(0.06)
+  expectedReturnHigh   Float    @default(0.12)
+  inflationAssumption  Float    @default(0.05)
+  linkedAccountIds     String   @default("") // comma-separated Account ids
+  createdAt            DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Snapshots (daily portfolio history)
+// ---------------------------------------------------------------------------
+
+model Snapshot {
+  id            String   @id @default(cuid())
+  portfolioId   String
+  portfolio     Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  date          DateTime
+  totalValue    String
+  investedValue String
+  currency      String   @default("INR")
+
+  @@unique([portfolioId, date])
+  @@index([portfolioId])
+}
+
+// ---------------------------------------------------------------------------
+// Documents (CAS/statement uploads) — see QUESTIONS.md #5
+// ---------------------------------------------------------------------------
+
+model DocumentUpload {
+  id           String   @id @default(cuid())
+  portfolioId  String
+  portfolio    Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  filename     String
+  storageRef   String
+  status       String   @default("pending_review") // pending_review | parsed | failed
+  uploadedAt   DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Alerts
+// ---------------------------------------------------------------------------
+
+model Alert {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  portfolioId  String?
+  portfolio    Portfolio? @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  type         String   // drift | price_move | dividend | stale_sync | missing_cost_basis | concentration | drawdown | connection_expiry | balance_mismatch | digest
+  severity     String   @default("info") // info | warning | critical
+  title        String
+  message      String
+  evidenceJson String   @default("{}")
+  createdAt    DateTime @default(now())
+  readAt       DateTime?
+  snoozedUntil DateTime?
+
+  @@index([userId])
+}
+
+model AlertRule {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type           String
+  thresholdValue Float?
+  channel        String   @default("in_app") // in_app | email | push
+  enabled        Boolean  @default(true)
+  quietHoursStart Int?    // 0-23
+  quietHoursEnd   Int?    // 0-23
+  frequencyCap    String  @default("realtime") // realtime | daily_digest | weekly_digest
+  createdAt      DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Billing (Razorpay shape; simulated when keys absent — see QUESTIONS.md #6)
+// ---------------------------------------------------------------------------
+
+model Subscription {
+  id                    String   @id @default(cuid())
+  userId                String   @unique
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  planId                String   @default("free") // free | pro_india | pro_global | premium
+  status                String   @default("active") // active | trialing | past_due | cancelled | expired
+  billingCountry        String   @default("IN")
+  currency              String   @default("INR")
+  interval              String   @default("monthly") // monthly | yearly
+  isTestMode            Boolean  @default(true)
+  razorpayCustomerId    String?
+  razorpaySubscriptionId String?
+  trialEndsAt           DateTime?
+  currentPeriodEnd      DateTime?
+  cancelledAt           DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+model Invoice {
+  id                String   @id @default(cuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  planId            String
+  amount            String
+  taxAmount         String   @default("0")
+  currency          String
+  status            String   // paid | pending | failed | refunded
+  razorpayOrderId   String?
+  razorpayPaymentId String?
+  webhookEventId    String?
+  issuedAt          DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Reports / audit / AI
+// ---------------------------------------------------------------------------
+
+model SavedReport {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  portfolioId String
+  kind        String   // portfolio_summary | performance | risk | income | tax | goal_progress
+  format      String   // csv | xlsx | pdf
+  schedule    String   @default("once") // once | monthly | quarterly | financial_year
+  storageRef  String
+  createdAt   DateTime @default(now())
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  eventType String   // sign_in | export | connection_change | admin_access | billing_event | data_deletion | consent_change
+  detailJson String  @default("{}")
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model AiQuery {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  question   String
+  intent     String   // matched allowed intent, or "disallowed"
+  answer     String
+  groundingJson String @default("{}")
+  createdAt  DateTime @default(now())
+}

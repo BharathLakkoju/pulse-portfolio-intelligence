@@ -1,0 +1,23 @@
+{
+  "name": "pulse-portfolio-intelligence",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Pulse: Your Portfolio Intelligence — read-only portfolio tracking and analytics platform",
+  "packageManager": "pnpm@11.22.0",
+  "scripts": {
+    "dev": "pnpm --filter @pulse/web dev",
+    "build": "pnpm --filter @pulse/calc-engine build && pnpm --filter @pulse/shared-types build && pnpm --filter @pulse/web build",
+    "start": "pnpm --filter @pulse/web start",
+    "db:migrate": "pnpm --filter @pulse/web db:migrate",
+    "db:seed": "pnpm --filter @pulse/web db:seed",
+    "db:reset": "pnpm --filter @pulse/web db:reset",
+    "test": "pnpm -r --if-present test",
+    "test:calc-engine": "pnpm --filter @pulse/calc-engine test",
+    "test:ingestion": "pnpm --filter @pulse/web exec vitest run tests/ingest.test.ts",
+    "test:webhooks": "pnpm --filter @pulse/web exec vitest run tests/billing.test.ts",
+    "typecheck": "pnpm -r --if-present typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}
